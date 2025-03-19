@@ -1,0 +1,1062 @@
+//Necessary Import Statements
+import SwiftUI
+import Speech
+import AVFoundation
+import OpenAIKit
+import Foundation
+import UIKit
+//Global variable that holds the currently selected style choice, set to the default of "High Fantasy"
+var styleChoice: String = "High Fantasy" // Define a state variable to hold the selected style choice
+//Defines the functional components of the main UI
+struct ContentView: View {
+    //Instantiates a slew of state variables that should trigger UI updates
+    
+    //isRecording keeps track of whether or not the program is recording
+    @State private var isRecording = false
+    
+    //audioRecorder sets a default audio recorder for the program's use
+    @State private var audioRecorder: AVAudioRecorder!
+    
+    //prepares a variable for use by the audioRecorder to make a new recording
+    @State private var audioURL: URL?
+    
+    //Creates an empty string for use by the prompt generator to keep track of what's been said
+    @State private var recognizedText = ""
+    
+    //Sets the default state of the generatedImage which gets displayed on the left or top half of the screen depending on orientation
+    @State private var generatedImage: UIImage?
+    
+    //???
+    var activityIndicator: UIActivityIndicatorView!
+    
+    //Makes the live transcription work
+    private let liveTranscription = LiveTranscription()
+    
+    //Keeps track of whether or not the previous recordings menu should be displayed
+    @State private var showRecordingsMenu = false
+    
+    //pre-loads the saved URLs to display in the recordings menu
+    @State var savedRecordings: [URL] = getRecordingsFromDocumentsDirectory()
+    
+    // Define urlStrings as a State variable to keep track of URLs that get unassigned due to .wav file deletion
+    @State var urlStrings: [String] = UserDefaults.standard.array(forKey: "urlList") as? [String] ?? []
+    
+    //actually displays the UI and works with above variables and below functions to create the main menu
+    var body: some View {
+        
+        //A GeometryReader is used here to keep things propoprtional to the orientation that they are in
+        GeometryReader { geometry in
+            Group {
+                //if the phone is sideways it is in landscape and thie orientation takes effect
+                if isLandscape() {
+                    //Defines where the generated image should be, and makes it consume half of the screen
+                    HStack {
+                        GeneratedImageSection(image: generatedImage, geometry: geometry)
+                            .frame(width: geometry.size.width / 2)
+                        Spacer()
+                        //Defines where the controls and settings should be and sets them to a cumulative half of the screen
+                        VStack {
+                            Spacer()
+                            controlsSection
+                            Spacer()
+                        }
+                        .frame(width: geometry.size.width / 2, alignment: .center)
+                    }
+                } else {
+                    // Portrait orientation setup
+                    //Similar to above except defines the image on top and uses a spacer to put everything else below it
+                    VStack {
+                        GeneratedImageSection(image: generatedImage, geometry: geometry)
+                            .frame(height: geometry.size.height / 2)
+                        Spacer()
+                        controlsSection
+                    }
+                }
+            }
+        }
+        //passes necessary variables and functions down to the previous recordings menu and displays it accordingly
+        .sheet(isPresented: $showRecordingsMenu) {
+            RecordingsMenu(filteredRecordings: getFilteredDirectory(strList: urlStrings), savedRecordings: $savedRecordings, isShowingMenu: $showRecordingsMenu,
+                           addNewURL: addNewURL, saveURLStrings: saveURLStrings)
+        }
+        //Triggers a view update when the orientation changes
+        .onAppear {
+            NotificationCenter.default.addObserver(forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main) { _ in
+                self.showRecordingsMenu = self.showRecordingsMenu
+            }
+            requestSpeechAuthorization() //defined to only appear once when the app is first downloaded
+            loadURLStrings() // Load URL strings when the view appears
+        }
+        //???
+        .onDisappear {
+            NotificationCenter.default.removeObserver(self, name: UIDevice.orientationDidChangeNotification, object: nil)
+        }
+    }
+    //Private helper function to determine if the phone is in landscape orientation
+    private func isLandscape() -> Bool {
+        UIDevice.current.orientation.isLandscape || UIScreen.main.bounds.width > UIScreen.main.bounds.height
+    }
+    //Defines how the image should be displayed and how much space it should take up
+    @ViewBuilder
+    private func GeneratedImageSection(image: UIImage?, geometry: GeometryProxy) -> some View {
+        if let image = image {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+        } else {
+            Color.clear
+        }
+    }
+    //Defines the settings and button placements and how they should be displayed
+    private var controlsSection: some View {
+        VStack {
+            HStack {
+                //This one starts the program running its image generation functionalities
+                Button(action: {
+                    async {
+                        await toggleRecording()
+                    }
+                }) {
+                    Text(isRecording ? "Stop Adventure" : "Start Adventure")
+                        .padding()
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                }
+                //This button will pull up the previous recordings menu
+                Button(action: {
+                    loadURLStrings()
+                    showRecordingsMenu.toggle()
+                }) {
+                    Text("Past Adventures")
+                        .padding()
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                }
+            }
+            .padding(.horizontal)
+            //Defines the two rows in the scroll for the image style choices
+            ScrollView {
+                // Define the columns for the grid
+                let columns = [
+                    GridItem(.flexible()),
+                    GridItem(.flexible())
+                ]
+                
+                // Use LazyVGrid to place buttons in two columns
+                LazyVGrid(columns: columns, spacing: 20) {
+                    ForEach(options, id: \.self) { option in
+                        Button(action: {
+                            styleChoice = option
+                        }) {
+                            Text(option)
+                                .padding()
+                                .background(styleChoice == option ? Color.blue : Color.gray)
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+                .padding()
+            }
+        }
+    }
+    
+    // Function to load URL strings from UserDefaults
+    func loadURLStrings() {
+        if let storedURLs = UserDefaults.standard.array(forKey: "urlList") as? [String] {
+            urlStrings = storedURLs
+        }
+    }
+    
+    // Function to save URL strings to UserDefaults
+    func saveURLStrings() {
+        UserDefaults.standard.set(urlStrings, forKey: "urlList")
+    }
+    
+    // Function to add a new URL to the list
+    func addNewURL(newURL: URL) {
+        urlStrings.append(newURL.absoluteString)
+        saveURLStrings()
+    }
+    
+    
+    
+    
+    // Defines the available style choice options, simply adding to this list adds more options
+    let options = ["High Fantasy", "Anime", "Steampunk", "Cyberpunk", "Realistic", "Video Game", "Cartoon", "Mythological", "Mystical", "Synthwave", "Cosmic", "Pixel Art", "Low Poly", "Scenery", "Battle Map", "Dystopian", "Utopian", "Stained Glass"]
+    
+    //Defines the necessary variables needed for the Previous Recordings menu to work
+    struct RecordingsMenu: View {
+        var filteredRecordings: [URL]
+        @Binding var savedRecordings: [URL]
+        @Binding var isShowingMenu: Bool
+        var addNewURL: (URL) -> Void
+        var saveURLStrings: () -> Void
+        
+        @State private var audioPlayer: AVAudioPlayer?
+        @State private var priorImage: UIImage?
+        @State private var isShowingPriorImage: Bool = false
+        @State private var isShowingRenameDialog: Bool = false
+        @State private var newName: String = ""
+        @State private var fileToRename: URL?
+        @State private var showingActionSheet = false
+        @State private var activeFileURL: URL?
+        @State var isPlayingContent = false
+        
+        
+        //Groups and sorts the recordings by their associated .wav file and
+        var groupedRecordings: [[URL]] {
+            // Fetch and sort the URLs by creation date.
+            
+            var sortedRecordings = filteredRecordings
+                .map { url -> (URL, Date) in
+                    let creationDate = (try? FileManager.default.attributesOfItem(atPath: url.path)[.creationDate] as? Date) ?? Date.distantPast
+                    return (url, creationDate)
+                }
+                .sorted { $0.1 < $1.1 }  // Sort descending by creation date.
+                .map { $0.0 }
+            
+            // Group the URLs based on the new rules.
+            var groups: [[URL]] = []
+            var currentGroup: [URL] = []
+            var collectPngs = false  // This flag indicates whether to collect PNGs.
+            
+            for recording in sortedRecordings {
+                let fileExtension = recording.pathExtension.lowercased()
+                
+                if fileExtension == "wav" {
+                    if !currentGroup.isEmpty {
+                        groups.append(currentGroup)
+                    }
+                    currentGroup = [recording]
+                    collectPngs = true  // Start collecting PNGs after this WAV.
+                } else if fileExtension == "png" && collectPngs {
+                    currentGroup.append(recording)  // Add PNG if collecting.
+                }
+            }
+            
+            // Append the last group if it isn't empty.
+            if !currentGroup.isEmpty {
+                groups.append(currentGroup)
+            }
+            //create a final group that stores all of the unassigned images and add it if it isn't empty
+            var newGroup: [URL] = []
+            for file in savedRecordings {
+                if(!(filteredRecordings.contains(file))){
+                    newGroup.append(file)
+                }
+            }
+            if(!(newGroup.isEmpty)){
+                groups.append(newGroup)
+            }
+            
+            return groups
+        }
+        
+        //defines the UI that displays all of the recordings and images
+        var body: some View {
+            VStack {
+                
+                HStack {
+                    
+                    Spacer()
+                    //defines a button to close the menu
+                    Button(action: {
+                        isShowingMenu = false // Close the menu
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.blue)
+                            .font(.title)
+                            .padding()
+                    }
+                }
+                
+                Spacer()
+                //Displays a list of instructions on functionalities contained within the menu
+                List {
+                    Text("Press Play to hear and see your adventure\nTap an image to enhance it\nPress and hold a .wav or image to see more options")
+                        .font(.callout)
+                        .padding()
+                    //creates the displayed recordings and images by iterating through the previously made groups.
+                    //it does this in reverse order as to maintain the integrity of appending images and sorting by creation date
+                    ForEach(groupedRecordings.reversed(), id: \.self) { group in
+                        Section(header: Text(selectHeader(group: group))) {
+                            // First list the WAV file
+                            if let wavFile = group.first(where: { $0.pathExtension.lowercased() == "wav" }) {
+                                HStack {
+                                    Text(wavFile.lastPathComponent)
+                                    Spacer()
+                                    //defines the play/stop button
+                                    Button(action: {
+                                        Task {
+                                            await playOrDisplayContent(url: wavFile, recordingsList: group)
+                                        }
+                                    }) {
+                                        Image(systemName: isPlayingContent ? "stop.circle.fill" : "play.circle.fill")
+                                            .foregroundColor(.blue)
+                                            .font(.title)
+                                    }
+                                }
+                                //creates a menu on a long press that defines the following buttons
+                                .contextMenu {
+                                    //deletes the .wav and all associated images
+                                    Button("Delete All", role: .destructive){
+                                        for getUrl in group {
+                                            if let index = savedRecordings.firstIndex(of: getUrl) {
+                                                savedRecordings.remove(at: index)
+                                                try? FileManager.default.removeItem(at: getUrl)
+                                            }
+                                        }
+                                    }
+                                    //deletes only the .wav and reassigns all images to the unassigned images group
+                                    Button("Delete", role: .destructive) {
+                                        // Ensure the png files are saved before deleting the wav file
+                                        let startIndex = 1
+                                        var pngFiles: [URL] = []
+                                        
+                                        for i in startIndex..<group.count {
+                                            let file = group[i]
+                                            if file.pathExtension.lowercased() == "png" {
+                                                pngFiles.append(file)
+                                            }
+                                        }
+                                        
+                                        for pngFile in pngFiles {
+                                            addNewURL(pngFile)
+                                        }
+                                        saveURLStrings()
+                                        
+                                        // Now delete the wav file
+                                        if let index = savedRecordings.firstIndex(of: wavFile) {
+                                            savedRecordings.remove(at: index)
+                                            try? FileManager.default.removeItem(at: wavFile)
+                                        }
+                                    }
+                                    //Allows for a .wav to be renamed, this renames the header of the group as well, as the header of the group is based on the .wav file's name
+                                    Button("Rename") {
+                                        fileToRename = wavFile
+                                        newName = wavFile.deletingPathExtension().lastPathComponent
+                                        isShowingRenameDialog = true
+                                    }
+                                }
+                            }
+                            
+                            // Then handle PNG files once per group such that they are displayed once and not once for every image in the group
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                LazyHStack {
+                                    ForEach(group.filter { $0.pathExtension.lowercased() == "png" }, id: \.self) { imageFileURL in
+                                        if let uiImage = loadImage(url: imageFileURL) {
+                                            Image(uiImage: uiImage)
+                                                .resizable()
+                                                .scaledToFit()
+                                                .frame(width: 100, height: 100)
+                                                .padding(.horizontal, 5)
+                                                //enhances the image on tap
+                                                .onTapGesture {
+                                                    self.priorImage = uiImage // Set the selected image to priorImage
+                                                    self.isShowingPriorImage = true // Show the image in the view where priorImage is used
+                                                }
+                                                //pulls up the extra options for images on long press
+                                                .onLongPressGesture {
+                                                    self.activeFileURL = imageFileURL
+                                                    self.showingActionSheet = true
+                                                }
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(height: 110)
+                            .actionSheet(isPresented: $showingActionSheet) {
+                                //Defines the delete and rename for the images
+                                ActionSheet(title: Text("Actions"), message: Text("Choose an option"), buttons: [
+                                    .destructive(Text("Delete")) {
+                                        deleteImage(activeFileURL)
+                                    },
+                                    .default(Text("Rename")) {
+                                        prepareForRename(activeFileURL)
+                                    },
+                                    .cancel()
+                                ])
+                            }
+                            
+                        }
+                    }
+                    .frame(maxHeight: .infinity)
+                    
+                }
+                .overlay(
+                    //the logic for the enhanced image overlay and the rename dialog overlay
+                    Group {
+                        if isShowingPriorImage, let priorImage = priorImage {
+                            ImageOverlay(image: priorImage, isShowing: $isShowingPriorImage)
+                        }
+                        if isShowingRenameDialog, let fileToRename = fileToRename {
+                            RenameDialog(fileURL: fileToRename, newName: $newName, isShowingRenameDialog: $isShowingRenameDialog, savedRecordings: $savedRecordings)
+                        }
+                    }
+                )
+            }
+        }
+        //helper function to load a given image
+        func loadImage(url: URL) -> UIImage? {
+            guard let imageData = try? Data(contentsOf: url),
+                  let image = UIImage(data: imageData) else {
+                return nil
+            }
+            return image
+        }
+        //helper function for deleting images
+        func deleteImage(_ url: URL?) {
+            guard let url = url, let index = savedRecordings.firstIndex(of: url) else { return }
+            savedRecordings.remove(at: index)
+            try? FileManager.default.removeItem(at: url)
+        }
+        //helper function that prepares images to be renamed
+        func prepareForRename(_ url: URL?) {
+            guard let url = url else { return }
+            fileToRename = url
+            newName = url.deletingPathExtension().lastPathComponent
+            isShowingRenameDialog = true
+        }
+        //helper function that takes the .wav file from the 0th index of each group and returns the generated name without .wav
+        //if the element at the first index is a .png then it instead returns the Unassigned Images header
+        func selectHeader(group: [URL]) -> String {
+            if(group[0].lastPathComponent.contains(".wav")){
+                return group[0].lastPathComponent.replacingOccurrences(of: ".wav", with: "") + " Session"
+            } else {
+                return "Unassigned Images"
+            }
+        }
+        
+        //private helper method that takes a URL and either starts playing the .wav as well as displaying it's associated images
+        //or enhances an image using a switch case
+        private func playOrDisplayContent(url: URL, recordingsList: [URL]) async {
+            
+            let fileType = url.pathExtension.lowercased()
+            var allUrls = [URL]()
+            switch fileType {
+            //If it is a wav file play or stop the recording and show the images
+            case "wav":
+                do {
+                    isPlayingContent = !isPlayingContent
+                    allUrls = recordingsList
+                    allUrls.removeFirst()
+                    let item = AVPlayerItem(url: url)
+                    let soundDuration = Double(item.asset.duration.value) / Double(item.asset.duration.timescale)
+                    
+                    var counter = 0.0
+                    
+                    if isPlayingContent{
+                        audioPlayer = try AVAudioPlayer(contentsOf: url)
+                        audioPlayer?.play()
+                    } else {
+                        audioPlayer?.stop()
+                    }
+                    for files in allUrls{
+                        counter += 1
+                    }
+                    var imageCounter = 0
+                    var taskMath = soundDuration/counter
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        for files in allUrls {
+                            if isPlayingContent {
+                                if let imageData = try? Data(contentsOf: files), let image = UIImage(data: imageData) {
+                                    DispatchQueue.main.sync {
+                                        self.priorImage = image
+                                        self.isShowingPriorImage = true
+                                        //print("Displaying image \(imageCounter)")
+                                    }
+                                    if !(taskMath < 3.0){
+                                        Thread.sleep(forTimeInterval: taskMath) // Control the display time
+                                    } else {
+                                        Thread.sleep(forTimeInterval: 3)
+                                    }
+                                    DispatchQueue.main.sync {
+                                        self.isShowingPriorImage = false
+                                        imageCounter += 1
+                                    }
+                                } else {
+                                    print("Error loading image")
+                                }
+                            }
+                        }
+                    }
+                    
+                } catch {
+                    print("Error playing recording: \(error.localizedDescription)")
+                }
+            //If it is a png set it to the priorImage and display it
+            case "png":
+                do {
+                    let imageData = try Data(contentsOf: url)
+                    priorImage = UIImage(data: imageData)
+                    isShowingPriorImage = true
+                } catch {
+                    print("Error loading image: \(error.localizedDescription)")
+                }
+            default:
+                print("Unsupported file type")
+            }
+        }
+        /*
+        //now unused code from when the recordings were grouped by the day they were created
+        private func formattedDate(from url: URL?) -> String {
+            guard let url = url else { return "" }
+            guard let creationDate = (try? FileManager.default.attributesOfItem(atPath: url.path)[.creationDate] as? Date) else {
+                return ""
+            }
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateStyle = .long
+            dateFormatter.timeStyle = .none
+            return dateFormatter.string(from: creationDate)
+        }
+         */
+    }
+    //Defines how the prior image should be displayed in both landscape and vertical view
+    struct ImageOverlay: View {
+        var image: UIImage
+        @Binding var isShowing: Bool
+        
+        var body: some View {
+            GeometryReader { geometry in
+                ZStack {
+                    Color.black.opacity(0.95).edgesIgnoringSafeArea(.all)
+                    
+                    if isLandscape(geometry: geometry) {
+                        // Landscape orientation
+                        VStack {
+                            
+                            //Spacer()
+                            HStack {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: geometry.size.width * 0.9, height: geometry.size.height * 0.9)
+                                    .padding()
+                                Spacer()
+                                Button(action: {
+                                    isShowing = false
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.white)
+                                        .font(.title)
+                                        .padding()
+                                }
+                                //Spacer()
+                            }
+                            
+                            
+                        }
+                    } else {
+                        // Portrait orientation
+                        VStack {
+                            Spacer()
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: geometry.size.width * 0.85, height: geometry.size.height * 0.85)
+                                .padding()
+                            //Spacer()
+                            Button(action: {
+                                isShowing = false
+                            }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.white)
+                                    .font(.title)
+                                    .padding()
+                            }
+                            Spacer()
+                        }
+                    }
+                }
+            }
+        }
+        
+        //private helper for determining if it's landscape orientation or not
+        private func isLandscape(geometry: GeometryProxy) -> Bool {
+            geometry.size.width > geometry.size.height
+        }
+    }
+    
+    //Defines the renaming overlay
+    struct RenameDialog: View {
+        var fileURL: URL
+        @Binding var newName: String
+        @Binding var isShowingRenameDialog: Bool
+        @Binding var savedRecordings: [URL]
+        
+        var body: some View {
+            VStack {
+                Text("Rename File")
+                    .font(.headline)
+                    .padding()
+                TextField("Enter new name", text: $newName)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .padding()
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                Divider()
+                HStack {
+                    Button("Cancel") {
+                        isShowingRenameDialog = false
+                    }
+                    .foregroundColor(.red)
+                    .padding()
+                    Spacer()
+                    Button("OK") {
+                        renameFile()
+                        isShowingRenameDialog = false
+                    }
+                    .foregroundColor(.blue)
+                    .padding()
+                }
+            }
+            .frame(width: 300, height: 200)
+            .background(Color.white)
+            .cornerRadius(15)
+            .shadow(radius: 10)
+            .padding()
+        }
+        //function that actually does the file renaming
+        func renameFile() {
+            let newURL = fileURL.deletingLastPathComponent().appendingPathComponent(newName + "." + fileURL.pathExtension)
+            do {
+                try FileManager.default.moveItem(at: fileURL, to: newURL)
+                if let index = savedRecordings.firstIndex(of: fileURL) {
+                    savedRecordings[index] = newURL
+                }
+            } catch {
+                print("File renaming failed: \(error.localizedDescription)")
+            }
+        }
+    }
+    //function that toggles whether or not the program is recording for image generation
+    //Sets the image to the default "start speaking square" until another image is generated or the togglerecording is turned off
+    private func toggleRecording() async {
+        if isRecording {
+            isRecording = false
+            if(generatedImage == UIImage(named: "beginSpeakingSquare")){
+                generatedImage = nil
+            }
+        } else {
+            isRecording = true
+            let tempImage = UIImage(named: "beginSpeakingSquare")
+            self.generatedImage = tempImage
+            print("Image loaded: \(generatedImage != nil)")
+            
+            // Start recording asynchronously
+            await startRecording()
+            
+        }
+    }
+    
+    // Define a key for UserDefaults that keeps track of how many recordings the user has made to avoid any name conflicts
+    private let appendXKey = "AppendXKey"
+    
+    // Getter and setter for appendX, handling UserDefaults
+    private var appendX: Int {
+        get {
+            UserDefaults.standard.integer(forKey: appendXKey)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: appendXKey)
+        }
+    }
+    
+    //private function that starts the app working by starting the recording, transcription, prompt generation, and image generation functions
+    //and includes all the logic for those within
+    private func startRecording() async {
+        
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetooth])
+            try audioSession.setActive(true)
+        } catch {
+            print("Failed to set audio session category and mode: \(error.localizedDescription)")
+            await toggleRecording()
+            return
+        }
+        
+        // Increment appendX
+        var mutableSelf = self
+        mutableSelf.appendX += 1
+        
+        let audioFilename = getDocumentsDirectory().appendingPathComponent("Scene" + String(appendX) + "Recording.wav")
+        print(audioFilename)
+        //savedRecordings.append(audioFilename)
+        audioURL = audioFilename
+        
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsFloatKey: false
+        ]
+        
+        do {
+            audioRecorder = try AVAudioRecorder(url: audioFilename, settings: settings)
+            
+            audioRecorder.record()
+            
+            // Start live transcription
+            
+            var transcriptionsList: [String] = []
+            var newPrompts: [String] = []
+            var chatGPTCompletion = "Null"
+            var previousText = ""
+            
+            var lastAPICallTime = Date()
+            
+            while isRecording == true {
+                await liveTranscription.startTranscribing { transcription, error in
+                    if let transcription = transcription {
+                        recognizedText = transcription
+                        previousText += transcription
+                        
+                        
+                        if !transcriptionsList.contains(transcription) && !transcriptionsList.contains(previousText){
+                            transcriptionsList.append(transcription)
+                            transcriptionsList.append(previousText)
+                        }
+                        
+                        // Check if enough time has elapsed
+                        if Date().timeIntervalSince(lastAPICallTime) > 10 { // 10 seconds
+                            lastAPICallTime = Date()
+                            
+                            // Fetch ChatGPT completion asynchronously
+                            chatGPTCompletion = await getChatGPTCompletion(prompt: previousText)
+                            
+                            if chatGPTCompletion != "Null" {
+                                if !newPrompts.contains(chatGPTCompletion){
+                                    newPrompts.append(chatGPTCompletion)
+                                    
+                                    // Generate and display/save image asynchronously
+                                    await displayAndSaveImage(b64Image: await generateImageWithDALLE(completionText: chatGPTCompletion)) { image in
+                                        self.generatedImage = image
+                                    }
+                                }
+                            }
+                        }
+                    } else if let error = error {
+                        print("Transcription Error: \(error.localizedDescription)")
+                    }
+                }
+                
+                // Stop transcribing to reset the process for minimal transcription loss
+                try await Task.sleep(nanoseconds: 10_000_000_000)
+                liveTranscription.stopTranscribing()
+                try await Task.sleep(nanoseconds: 100_000_000)  // brief pause before restarting
+            }
+            
+            stopRecording()
+            let lastIndex = transcriptionsList.count - 1
+            await gptRenameFile(fullTranscription: transcriptionsList[lastIndex], fileName: audioFilename)
+            
+        } catch {
+            print("Error starting recording: \(error.localizedDescription)")
+        }
+    }
+    
+    //private helper function that has chatGPT set the initial name for every .wav file based on the transcription
+    private func gptRenameFile(fullTranscription: String, fileName: URL) async{
+        let openAI = OpenAI(Configuration(/*this is where the details go*/))
+        do {
+            let chat: [ChatMessage] = [
+                ChatMessage(role: .system, content: "You are a concise assistant who takes image generation prompts and summarizes them into a few key words."),
+                ChatMessage(role: .user, content: "Please summarize the following into no more than four words, seperated by underscores: " + fullTranscription),
+            ]
+            
+            let chatParameters = ChatParameters(
+                model: .chatGPTTurbo,  // ID of the model to use.
+                messages: chat  // A list of messages comprising the conversation so far.
+            )
+            
+            let chatCompletion = try await openAI.generateChatCompletion(
+                parameters: chatParameters
+            )
+            if let message = chatCompletion.choices[0].message {
+                let content = message.content ?? "savedRecording"
+                //print(content)
+                let newURL = fileName.deletingLastPathComponent().appendingPathComponent(content + "." + fileName.pathExtension)
+                do {
+                    try FileManager.default.moveItem(at: fileName, to: newURL)
+                    if let index = savedRecordings.firstIndex(of: fileName) {
+                        savedRecordings[index] = newURL
+                    }
+                } catch {
+                    print("File renaming failed: \(error.localizedDescription)")
+                }
+            }
+        } catch {
+            print(error)
+        }
+        
+    }
+    
+    //Stops the functionality of the prior function when called
+    private func stopRecording() {
+        audioRecorder.stop()
+        audioRecorder = nil
+        
+        //This stopped the live transcription in older versions of the code, however the transcription stops itself often enough now that this is no longer needed
+        //liveTranscription.stopTranscribing()
+    }
+    
+    //Private helper method for getting all the saved documents from this app
+    private func getDocumentsDirectory() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+    
+    //private helper function that gets the user's permission to use the microphone
+    private func requestSpeechAuthorization() {
+        SFSpeechRecognizer.requestAuthorization { authStatus in
+            if authStatus != .authorized {
+                print("Speech recognition not authorized")
+            }
+        }
+    }
+}
+//Similar to getDocuments directory but filters out files with a zero file size
+func getRecordingsFromDocumentsDirectory() -> [URL] {
+    do {
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        var recordingFiles = try FileManager.default.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
+        
+        // Filter out files with zero file sizes
+        recordingFiles = recordingFiles.filter { getFileSize(atPath: $0.path) ?? 0 > 0 }
+        
+        // Set permissions for each remaining file
+        for fileURL in recordingFiles {
+            do {
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fileURL.path)
+            } catch {
+                print("Error setting permissions for file at path \(fileURL.path): \(error)")
+            }
+        }
+        
+        // Filter and return files with specified extensions
+        let extensions = ["wav", "png"]
+        var filteredFiles = recordingFiles.filter { fileURL in
+            let fileExtension = fileURL.pathExtension.lowercased()
+            return extensions.contains(fileExtension)
+        }
+        
+        
+        return filteredFiles
+    } catch {
+        print("Error fetching recording files: \(error)")
+        return []
+    }
+}
+//Uses a different filtering than the previous function to get files
+func getFilteredDirectory(strList: [String]) -> [URL] {
+    do {
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        var recordingFiles = try FileManager.default.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
+        
+        // Filter out files with zero file sizes
+        recordingFiles = recordingFiles.filter { getFileSize(atPath: $0.path) ?? 0 > 0 }
+        
+        // Set permissions for each remaining file
+        for fileURL in recordingFiles {
+            do {
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fileURL.path)
+            } catch {
+                print("Error setting permissions for file at path \(fileURL.path): \(error)")
+            }
+        }
+        
+        // Filter and return files with specified extensions
+        let extensions = ["wav", "png"]
+        var filteredFiles = recordingFiles.filter { fileURL in
+            let fileExtension = fileURL.pathExtension.lowercased()
+            return extensions.contains(fileExtension) && !strList.contains(fileURL.absoluteString)
+        }
+        
+        return filteredFiles
+    } catch {
+        print("Error fetching recording files: \(error)")
+        return []
+    }
+}
+//helper function that just gets file sizes for comparisons elsewhere
+func getFileSize(atPath filePath: String) -> UInt64? {
+    do {
+        let fileAttributes = try FileManager.default.attributesOfItem(atPath: filePath)
+        if let fileSize = fileAttributes[.size] as? UInt64 {
+            return fileSize
+        } else {
+            print("File size attribute not found")
+            return nil
+        }
+    } catch {
+        print("Error getting file size: \(error.localizedDescription)")
+        return nil
+    }
+}
+//A live transcription class that takes several variables and uses apples API to transcribe voices
+class LiveTranscription {
+    private let audioEngine = AVAudioEngine()
+    private let speechRecognizer: SFSpeechRecognizer? = SFSpeechRecognizer()
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private var transcriptionTimer: Timer?
+    private var transcriptionBuffer: String?
+    
+    func startTranscribing(completion: @escaping (String?, Error?) async -> Void) async{
+        //print("transcribing")
+        let inputNode = audioEngine.inputNode
+        
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+            self.recognitionRequest?.append(buffer)
+        }
+        
+        audioEngine.prepare()
+        
+        do {
+            try audioEngine.start()
+        } catch {
+            print("Audio engine couldn't start because of an error: \(error.localizedDescription)")
+            await completion(nil, error)
+            return
+        }
+        //print("Got to recording audio")
+        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+        
+        guard let recognitionRequest = recognitionRequest else {
+            fatalError("Unable to create a SFSpeechAudioBufferRecognitionRequest object")
+        }
+        
+        recognitionTask = speechRecognizer?.recognitionTask(with: recognitionRequest) { result, error in
+            if let result = result {
+                self.transcriptionBuffer = result.bestTranscription.formattedString
+                Task{
+                    //try await Task.sleep(nanoseconds: 5000000000)
+                    await completion(self.transcriptionBuffer, nil)}
+            } else if let error = error {
+                print("Recognition failed with error: \(error.localizedDescription)")
+                _ = DispatchSemaphore(value:0)
+                DispatchQueue.main.async{
+                    Task {
+                        await completion(nil, error)
+                    }
+                }
+            }
+        }
+    }
+    
+    //class function that stops the transcription.
+    func stopTranscribing() {
+        audioEngine.stop()
+        recognitionRequest?.endAudio()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionRequest = nil
+        recognitionTask = nil
+    }
+}
+//First API call that takes the input text derived from the transcription and turns it into an image generation prompt
+//based on the user input and details congruent with the selected style choice
+func getChatGPTCompletion(prompt: String) async -> String {
+    
+    let openAI = OpenAI(Configuration(/*this is where the details go*/))
+    do {
+        let chat: [ChatMessage] = [
+            ChatMessage(role: .system, content: "You are a creative assistant."),
+            ChatMessage(role: .user, content: "please rewrite the following as an image generation prompt " + prompt + ". If possible, please add details that would be included in a " + styleChoice + " style work."),
+        ]
+        
+        let chatParameters = ChatParameters(
+            model: .gpt4,  // ID of the model to use. m
+            messages: chat  // A list of messages comprising the conversation so far.
+        )
+        
+        let chatCompletion = try await openAI.generateChatCompletion(
+            parameters: chatParameters
+        )
+        if let message = chatCompletion.choices[0].message {
+            guard let content = message.content else { return message.content! }
+            //print("Content is: " + content)
+            return content
+            
+        }
+    } catch {
+        print(error)
+        return "Null"
+    }
+    return "Null"
+}
+// Define numberKey globally
+let numberKey = "MyNumberKey"
+// Declare and initialize appendY outside the function
+var appendY: Int {
+    get {
+        UserDefaults.standard.integer(forKey: numberKey)
+    }
+    set {
+        UserDefaults.standard.set(newValue, forKey: numberKey)
+    }
+}
+//Second API call that takes the output of the image prompt generation and turns it into an image using Dalle-2, when the supporting package gets updated this will need to be
+//updated to Dalle-3
+func generateImageWithDALLE(completionText: String) async -> String {
+    
+    let openAi = OpenAI(Configuration(/*this is where the details go */))
+    
+    if completionText != "Null" {
+        do {
+            let imageParam = ImageParameters(
+                prompt: completionText + ". " + styleChoice + " style.",
+                resolution: .large,
+                responseFormat: .base64Json
+            )
+            let result = try await openAi.createImage(parameters: imageParam)
+            //try await Task.sleep(nanoseconds: 10000000000)
+            let b64Image = result.data[0].image
+            return b64Image
+            
+        } catch {
+            print("Unable to generate/save image")
+            print(error)
+            return "Null"
+        }
+    } else {
+        print("Null detected, will not generate image")
+        return "Null"
+    }
+}
+//This takes the generated image and outputs it to the front page while also saving the image to the device for later retrieval
+func displayAndSaveImage(b64Image: String, completion: @escaping (UIImage) -> Void) async{
+    // Save base64 image to the app's documents directory
+    if let imageData = Data(base64Encoded: b64Image) {
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let imageURL = documentsDirectory.appendingPathComponent("Scene" + String(appendY) + "Image.png")
+        
+        do { try imageData.write(to: imageURL)
+        } catch {
+            print("unable to save Image")
+        }
+        
+        // Load the saved image and call the completion handler
+        if let image = UIImage(contentsOfFile: imageURL.path) {
+            // Increment appendY
+            appendY += 1
+            completion(image)
+        } else {
+            print("Error loading saved image")
+        }
+    } else {
+        print("Error decoding base64 image")
+    }
+}
+//displays everything defined above, effectively the private static void main of swift contentview
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+    }
+}
